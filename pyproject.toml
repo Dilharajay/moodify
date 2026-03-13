@@ -1,0 +1,13 @@
+[project]
+name = "moodify"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.12"
+dependencies = [
+    "beautifulsoup4>=4.14.3",
+    "fake-useragent>=2.2.0",
+    "lxml>=6.0.2",
+    "python-dotenv>=1.2.2",
+    "requests>=2.32.5",
+    "tqdm>=4.67.3",
+]
