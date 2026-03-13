@@ -1,5 +1,5 @@
 """
-AestheteAI — Main Entry Point
+Moodify — Main Entry Point
 Phase 1: Run keyword scraping and save results to JSON
 """
 
@@ -8,7 +8,7 @@ from scraper.behance_scraper import scrape_behance
 from utils.storage import save_to_json
 
 def main():
-    parser = argparse.ArgumentParser(description="AestheteAI — Mood Board Scraper")
+    parser = argparse.ArgumentParser(description="Moodify — Mood Board Scraper")
     parser.add_argument("--keyword", type=str, required=True, help="Search keyword (e.g. 'dark minimalism')")
     parser.add_argument("--pages", type=int, default=3, help="Number of pages to scrape (default: 3)")
     args = parser.parse_args()
