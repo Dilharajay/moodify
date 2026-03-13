@@ -1,143 +1,184 @@
 """
-Phase 1 — Behance Static Scraper
-Scrapes project image URLs and metadata from Behance search results.
-
-NOTE: Behance renders most content via JavaScript. This static scraper
-targets the initial HTML payload and any embedded JSON data Behance
-injects into the page. Phase 2 will upgrade this to Playwright for
-full dynamic rendering.
+Phase 2 — Behance Dynamic Scraper
+Uses Playwright to launch a real Chromium browser, bypassing bot detection.
+Implements infinite scroll to load more images per page.
 """
 
-import requests
 import json
 import re
-from bs4 import BeautifulSoup
-from typing import Optional
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+from config import MAX_IMAGES_PER_KEYWORD, REQUEST_DELAY
+from utils.helpers import polite_delay, logger
 
-from requests import session
-
-session = requests.Session()
-
-from config import BEHANCE_BASE_SEARCH_URL, BASE_HEADERS, REQUEST_DELAY, MAX_IMAGES_PER_KEYWORD
-from utils.helpers import get_random_headers, polite_delay, logger
+BEHANCE_BASE_URL = "https://www.behance.net/search/projects"
 
 
-def fetch_page(url: str, params: dict) -> Optional[str]:
+def extract_from_page(page) -> list[dict]:
     """
-    Fetch raw HTML for a given URL and query params.
-    Returns HTML string or None on failure.
+    Extract image records from a fully rendered Behance page.
+    Targets the __NEXT_DATA__ JSON blob injected by Behance.
+    Falls back to scraping rendered img tags if JSON is unavailable.
     """
-    headers = get_random_headers(BASE_HEADERS)
-    try:
-        # first visit the home page to pickup cookies
-        session.get("https://www.behance.net", headers=headers, timeout=15)
-        # then make the search
-        response = requests.get(url, headers=headers, params=params, timeout=15)
-        response.raise_for_status()
-        logger.info(f"Fetched: {response.url} | Status: {response.status_code}")
-        return response.text
-    except requests.RequestException as e:
-        logger.error(f"Request failed: {e}")
-        return None
-
-
-def extract_projects_from_html(html: str) -> list[dict]:
-    """
-    Parse Behance search HTML to extract project metadata.
-    Behance embeds a JSON blob in a <script> tag — we target that first,
-    then fall back to meta tag parsing.
-    """
-    soup = BeautifulSoup(html, "lxml")
     projects = []
 
-    # Strategy 1: Extract embedded JSON from script tags
-    # Behance injects window.__INITIAL_STATE__ or similar
-    scripts = soup.find_all("script")
-    for script in scripts:
-        if script.string and "ImageUrl" in script.string:
-            # Look for image URL patterns inside inline JS
-            urls = re.findall(r'"(https://mir-s3[^"]+\.(?:jpg|jpeg|png|webp))"', script.string)
-            titles = re.findall(r'"name"\s*:\s*"([^"]+)"', script.string)
-            owners = re.findall(r'"display_name"\s*:\s*"([^"]+)"', script.string)
-
-            for i, url in enumerate(urls[:MAX_IMAGES_PER_KEYWORD]):
+    # Strategy 1 — parse __NEXT_DATA__ JSON blob
+    try:
+        next_data_raw = page.eval_on_selector(
+            "script#__NEXT_DATA__",
+            "el => el.textContent"
+        )
+        if next_data_raw:
+            data = json.loads(next_data_raw)
+            results = (
+                data.get("props", {})
+                    .get("pageProps", {})
+                    .get("dehydratedState", {})
+                    .get("queries", [{}])[0]
+                    .get("state", {})
+                    .get("data", {})
+                    .get("search", {})
+                    .get("content", {})
+                    .get("projects", {})
+                    .get("items", [])
+            )
+            for item in results:
+                covers = item.get("covers", {})
+                image_url = (
+                    covers.get("original") or
+                    covers.get("max_808") or
+                    covers.get("404") or
+                    covers.get("202")
+                )
+                if not image_url:
+                    continue
                 projects.append({
-                    "image_url": url,
-                    "title": titles[i] if i < len(titles) else "Unknown",
-                    "owner": owners[i] if i < len(owners) else "Unknown",
+                    "image_url": image_url,
+                    "title": item.get("name", "Untitled"),
+                    "owner": item.get("owners", [{}])[0].get("display_name", "Unknown"),
                     "source": "behance",
-                    "keyword": None  # filled in by caller
+                    "keyword": None
                 })
 
             if projects:
-                logger.info(f"Extracted {len(projects)} projects from inline JSON")
+                logger.info(f"Extracted {len(projects)} projects from __NEXT_DATA__")
                 return projects
 
-    # Strategy 2: Fallback — scrape Open Graph / meta image tags from project cards
-    cards = soup.select("div.ProjectCoverNeue-root")
+    except Exception as e:
+        logger.warning(f"__NEXT_DATA__ parse failed: {e}")
+
+    # Strategy 2 — fallback to rendered img tags
+    logger.info("Falling back to rendered img tag extraction...")
+    cards = page.query_selector_all("div[class*='ProjectCoverNeue']")
     for card in cards:
-        img_tag = card.find("img")
-        title_tag = card.find("p", class_=re.compile("title", re.I))
-        owner_tag = card.find("a", class_=re.compile("owner", re.I))
+        img = card.query_selector("img")
+        title_el = card.query_selector("p[class*='title'], span[class*='title']")
+        owner_el = card.query_selector("a[class*='owner'], span[class*='owner']")
 
-        if img_tag and img_tag.get("src"):
-            projects.append({
-                "image_url": img_tag["src"],
-                "title": title_tag.text.strip() if title_tag else "Unknown",
-                "owner": owner_tag.text.strip() if owner_tag else "Unknown",
-                "source": "behance",
-                "keyword": None
-            })
+        if img:
+            src = img.get_attribute("src") or img.get_attribute("data-src") or ""
+            if src:
+                projects.append({
+                    "image_url": src,
+                    "title": title_el.inner_text().strip() if title_el else "Untitled",
+                    "owner": owner_el.inner_text().strip() if owner_el else "Unknown",
+                    "source": "behance",
+                    "keyword": None
+                })
 
-    logger.info(f"Fallback extracted {len(projects)} projects from HTML cards")
+    logger.info(f"Fallback extracted {len(projects)} projects")
     return projects
+
+
+def scroll_to_load(page, target: int = 50):
+    """
+    Scroll down repeatedly to trigger lazy loading until
+    we have enough images or stop finding new ones.
+    """
+    previous_count = 0
+    stall_count = 0
+
+    while True:
+        current_cards = page.query_selector_all("div[class*='ProjectCoverNeue']")
+        current_count = len(current_cards)
+        logger.info(f"Cards visible: {current_count}")
+
+        if current_count >= target:
+            break
+
+        if current_count == previous_count:
+            stall_count += 1
+            if stall_count >= 3:
+                logger.info("No new cards loading, stopping scroll.")
+                break
+        else:
+            stall_count = 0
+
+        previous_count = current_count
+        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+        page.wait_for_timeout(2000)
 
 
 def scrape_behance(keyword: str, pages: int = 3) -> list[dict]:
     """
-    Main scraping function for Behance.
-    Iterates over multiple pages and returns combined results.
+    Main Behance scraper using Playwright.
 
     Args:
         keyword: Search term (e.g. "dark minimalism")
-        pages: Number of search result pages to scrape
+        pages:   Number of search result pages to scrape
 
     Returns:
-        List of project dicts with image_url, title, owner, source, keyword
+        List of image dicts with image_url, title, owner, source, keyword
     """
     all_projects = []
 
-    for page in range(1, pages + 1):
-        logger.info(f"Scraping Behance | Keyword: '{keyword}' | Page: {page}")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        context = browser.new_context(
+            viewport={"width": 1440, "height": 900},
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+        )
+        page = context.new_page()
 
-        encoded_keyword = keyword.strip().replace(" ", "%20")
-        url = f"{BEHANCE_BASE_SEARCH_URL}/{encoded_keyword}"
+        # Block images and fonts to speed up page loads
+        page.route("**/*.{png,jpg,jpeg,webp,gif,woff,woff2}", lambda route: route.abort())
 
-        params = {
-            "search_text": keyword,
-            "page": page,
-            "sort": "recommended"
-        }
+        for page_num in range(1, pages + 1):
+            logger.info(f"Scraping Behance | Keyword: '{keyword}' | Page: {page_num}")
 
-        html = fetch_page(url, params)
-        if not html:
-            logger.warning(f"Skipping page {page} — no HTML returned")
-            continue
+            encoded_keyword = keyword.strip().replace(" ", "%20")
+            url = f"{BEHANCE_BASE_URL}/{encoded_keyword}?sort=recommended&page={page_num}"
 
-        projects = extract_projects_from_html(html)
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                page.wait_for_timeout(3000)
 
-        # Tag each record with the keyword
-        for p in projects:
-            p["keyword"] = keyword
+                # Scroll to load more cards
+                scroll_to_load(page, target=MAX_IMAGES_PER_KEYWORD)
 
-        all_projects.extend(projects)
-        logger.info(f"Running total: {len(all_projects)} projects")
+                projects = extract_from_page(page)
 
-        if len(all_projects) >= MAX_IMAGES_PER_KEYWORD:
-            logger.info("Reached max image limit. Stopping.")
-            break
+                for p_item in projects:
+                    p_item["keyword"] = keyword
 
-        if page < pages:
-            polite_delay(base=REQUEST_DELAY)
+                all_projects.extend(projects)
+                logger.info(f"Running total: {len(all_projects)} projects")
+
+                if len(all_projects) >= MAX_IMAGES_PER_KEYWORD:
+                    logger.info("Reached max image limit. Stopping.")
+                    break
+
+                if page_num < pages:
+                    polite_delay(base=REQUEST_DELAY)
+
+            except PlaywrightTimeout:
+                logger.warning(f"Timeout on page {page_num}, skipping.")
+                continue
+
+        browser.close()
 
     return all_projects[:MAX_IMAGES_PER_KEYWORD]
