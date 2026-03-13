@@ -13,7 +13,12 @@ import json
 import re
 from bs4 import BeautifulSoup
 from typing import Optional
-from config import BEHANCE_SEARCH_URL, BASE_HEADERS, REQUEST_DELAY, MAX_IMAGES_PER_KEYWORD
+
+from requests import session
+
+session = requests.Session()
+
+from config import BEHANCE_BASE_SEARCH_URL, BASE_HEADERS, REQUEST_DELAY, MAX_IMAGES_PER_KEYWORD
 from utils.helpers import get_random_headers, polite_delay, logger
 
 
@@ -24,6 +29,9 @@ def fetch_page(url: str, params: dict) -> Optional[str]:
     """
     headers = get_random_headers(BASE_HEADERS)
     try:
+        # first visit the home page to pickup cookies
+        session.get("https://www.behance.net", headers=headers, timeout=15)
+        # then make the search
         response = requests.get(url, headers=headers, params=params, timeout=15)
         response.raise_for_status()
         logger.info(f"Fetched: {response.url} | Status: {response.status_code}")
@@ -102,13 +110,16 @@ def scrape_behance(keyword: str, pages: int = 3) -> list[dict]:
     for page in range(1, pages + 1):
         logger.info(f"Scraping Behance | Keyword: '{keyword}' | Page: {page}")
 
+        encoded_keyword = keyword.strip().replace(" ", "%20")
+        url = f"{BEHANCE_BASE_SEARCH_URL}/{encoded_keyword}"
+
         params = {
             "search_text": keyword,
             "page": page,
             "sort": "recommended"
         }
 
-        html = fetch_page(BEHANCE_SEARCH_URL, params)
+        html = fetch_page(url, params)
         if not html:
             logger.warning(f"Skipping page {page} — no HTML returned")
             continue
