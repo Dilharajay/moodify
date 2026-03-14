@@ -1,174 +1,156 @@
 """
-Tests for scraper/behance_scraper.py
+Tests for scraper/behance_scraper.py (Phase 2)
 
 What we test:
-- fetch_page() returns HTML string on success
-- fetch_page() returns None on network failure
-- extract_projects_from_html() pulls records from a mock HTML payload
-- extract_projects_from_html() returns empty list on unrecognized HTML
+- find_projects_recursive() correctly extracts projects from JSON blobs
+- extract_from_page() pulls image records from mocked Playwright page
 - scrape_behance() respects MAX_IMAGES_PER_KEYWORD limit
 - scrape_behance() tags all records with the correct keyword
-- scrape_behance() skips pages that return no HTML
 
-NOTE: We never make real HTTP requests in tests.
-      All network calls are mocked with unittest.mock.patch.
+Note: Playwright and network calls are mocked.
 """
 
 import pytest
+import json
 from unittest.mock import patch, MagicMock
-from scraper.behance_scraper import fetch_page, extract_projects_from_html, scrape_behance
-
+from scraper.behance_scraper import find_projects_recursive, extract_from_page, scrape_behance
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 
-MOCK_HTML_WITH_JSON = """
-<html><body>
-<script>
-var data = {
-  "ImageUrl": "placeholder",
-  "projects": [
-    {"name": "Dark Poster", "display_name": "artist_one"},
-    {"name": "Noir Edit", "display_name": "artist_two"}
-  ]
-};
-</script>
-<img src="https://mir-s3.behance.net/img1.jpg"/>
-<img src="https://mir-s3.behance.net/img2.jpg"/>
-</body></html>
-"""
+MOCK_JSON_BLOB = {
+    "nodes": [
+        {
+            "name": "Project 1",
+            "owners": [{"displayName": "Owner 1"}],
+            "covers": {
+                "allAvailable": [
+                    {"url": "https://mir-s3.behance.net/p1_original.jpg", "width": 2000}
+                ]
+            }
+        },
+        {
+            "name": "Project 2",
+            "owners": [{"displayName": "Owner 2"}],
+            "covers": {
+                "808": "https://mir-s3.behance.net/p2_808.jpg"
+            }
+        }
+    ]
+}
 
-MOCK_HTML_CARD_FALLBACK = """
-<html><body>
-  <div class="ProjectCoverNeue-root">
-    <img src="https://mir-s3.behance.net/card1.jpg"/>
-    <p class="title">Minimal Black</p>
-    <a class="owner">studio_x</a>
-  </div>
-  <div class="ProjectCoverNeue-root">
-    <img src="https://mir-s3.behance.net/card2.jpg"/>
-    <p class="title">Editorial White</p>
-    <a class="owner">studio_y</a>
-  </div>
-</body></html>
-"""
+# ── find_projects_recursive ───────────────────────────────────────────────────
 
-EMPTY_HTML = "<html><body><p>Nothing here</p></body></html>"
+def test_find_projects_recursive_success():
+    data = {"some_key": {"nodes": MOCK_JSON_BLOB["nodes"]}}
+    results = find_projects_recursive(data)
+    assert results is not None
+    assert len(results) == 2
+    assert results[0]["name"] == "Project 1"
 
-
-# ── fetch_page ────────────────────────────────────────────────────────────────
-
-class TestFetchPage:
-
-    @patch("scraper.behance_scraper.requests.get")
-    def test_returns_html_string_on_success(self, mock_get):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.text = "<html>OK</html>"
-        mock_response.url = "https://www.behance.net/search/projects"
-        mock_get.return_value = mock_response
-
-        result = fetch_page("https://www.behance.net/search/projects", params={})
-        assert isinstance(result, str)
-        assert "<html>" in result
-
-    @patch("scraper.behance_scraper.requests.get")
-    def test_returns_none_on_request_exception(self, mock_get):
-        import requests
-        mock_get.side_effect = requests.RequestException("Connection refused")
-
-        result = fetch_page("https://www.behance.net/search/projects", params={})
-        assert result is None
-
-    @patch("scraper.behance_scraper.requests.get")
-    def test_raises_for_bad_status_code(self, mock_get):
-        import requests
-        mock_response = MagicMock()
-        mock_response.raise_for_status.side_effect = requests.HTTPError("403 Forbidden")
-        mock_get.return_value = mock_response
-
-        result = fetch_page("https://www.behance.net/search/projects", params={})
-        assert result is None
+def test_find_projects_recursive_failure():
+    data = {"no_projects": "here"}
+    results = find_projects_recursive(data)
+    assert results is None
 
 
-# ── extract_projects_from_html ────────────────────────────────────────────────
+# ── extract_from_page ────────────────────────────────────────────────────────
 
-class TestExtractProjectsFromHtml:
+def test_extract_from_page_json_strategy():
+    mock_page = MagicMock()
+    # Mocking scripts on the page
+    # Behance scraper expects a long string (> 10000 chars) containing 'mir-s3'
+    # Use a large dictionary to ensure it passes the length check and contains 'mir-s3'
+    large_data = {
+        "nodes": MOCK_JSON_BLOB["nodes"],
+        "extra": "x" * 10000
+    }
+    blob_content = json.dumps(large_data)
+    
+    mock_page.eval_on_selector_all.return_value = [
+        "console.log('hello')",
+        blob_content
+    ]
+    
+    results = extract_from_page(mock_page)
+    assert len(results) == 2
+    assert results[0]["title"] == "Project 1"
+    assert results[0]["owner"] == "Owner 1"
+    assert results[0]["source"] == "behance"
+    assert "p1_original.jpg" in results[0]["image_url"]
 
-    def test_returns_list(self):
-        result = extract_projects_from_html(MOCK_HTML_WITH_JSON)
-        assert isinstance(result, list)
+def test_extract_from_page_fallback_strategy():
+    mock_page = MagicMock()
+    # Strategy 1 fails (no blob)
+    mock_page.eval_on_selector_all.return_value = []
+    
+    # Strategy 2: query_selector_all for cards
+    mock_card = MagicMock()
+    mock_img = MagicMock()
+    mock_img.get_attribute.return_value = "https://mir-s3.behance.net/fallback.jpg"
+    
+    # Mock elements for title and owner
+    mock_title_el = MagicMock()
+    mock_title_el.inner_text.return_value.strip.return_value = "Fallback Title"
+    
+    mock_owner_el = MagicMock()
+    mock_owner_el.inner_text.return_value.strip.return_value = "Fallback Owner"
+    
+    def side_effect(sel):
+        if "img" in sel: return mock_img
+        if "title" in sel: return mock_title_el
+        if "owner" in sel: return mock_owner_el
+        return None
 
-    def test_returns_empty_list_on_empty_html(self):
-        result = extract_projects_from_html(EMPTY_HTML)
-        assert result == []
-
-    def test_each_record_has_required_fields(self):
-        result = extract_projects_from_html(MOCK_HTML_CARD_FALLBACK)
-        if result:
-            for record in result:
-                assert "image_url" in record
-                assert "title" in record
-                assert "owner" in record
-                assert "source" in record
-
-    def test_source_is_always_behance(self):
-        result = extract_projects_from_html(MOCK_HTML_CARD_FALLBACK)
-        for record in result:
-            assert record["source"] == "behance"
-
-    def test_image_urls_are_strings(self):
-        result = extract_projects_from_html(MOCK_HTML_CARD_FALLBACK)
-        for record in result:
-            assert isinstance(record["image_url"], str)
-            assert len(record["image_url"]) > 0
+    mock_card.query_selector.side_effect = side_effect
+    
+    mock_page.query_selector_all.return_value = [mock_card]
+    
+    results = extract_from_page(mock_page)
+    assert len(results) == 1
+    assert results[0]["title"] == "Fallback Title"
+    assert "fallback.jpg" in results[0]["image_url"]
 
 
 # ── scrape_behance ────────────────────────────────────────────────────────────
 
-class TestScrapeBehance:
+@patch("scraper.behance_scraper.sync_playwright")
+@patch("scraper.behance_scraper.extract_from_page")
+@patch("scraper.behance_scraper.scroll_to_load")
+def test_scrape_behance_calls_playwright(mock_scroll, mock_extract, mock_pw):
+    # Setup mocks for Playwright context
+    mock_browser = MagicMock()
+    mock_context = MagicMock()
+    mock_page = MagicMock()
+    
+    mock_pw.return_value.__enter__.return_value.chromium.launch.return_value = mock_browser
+    mock_browser.new_context.return_value = mock_context
+    mock_context.new_page.return_value = mock_page
+    
+    mock_extract.return_value = [
+        {"image_url": "url1", "title": "T1", "owner": "O1", "source": "behance"}
+    ]
+    
+    results = scrape_behance(keyword="test", pages=1)
+    
+    assert len(results) == 1
+    assert results[0]["keyword"] == "test"
+    mock_page.goto.assert_called()
+    mock_extract.assert_called_with(mock_page)
 
-    @patch("scraper.behance_scraper.polite_delay")
-    @patch("scraper.behance_scraper.fetch_page")
-    def test_all_records_tagged_with_keyword(self, mock_fetch, mock_delay):
-        mock_fetch.return_value = MOCK_HTML_CARD_FALLBACK
-        results = scrape_behance(keyword="editorial", pages=1)
-        for record in results:
-            assert record["keyword"] == "editorial"
+@patch("scraper.behance_scraper.sync_playwright")
+@patch("scraper.behance_scraper.extract_from_page")
+def test_scrape_behance_respects_limit(mock_extract, mock_pw):
+    # Setup mocks
+    mock_browser = MagicMock()
+    mock_pw.return_value.__enter__.return_value.chromium.launch.return_value = mock_browser
+    mock_browser.new_context.return_value.new_page.return_value = MagicMock()
 
-    @patch("scraper.behance_scraper.polite_delay")
-    @patch("scraper.behance_scraper.fetch_page")
-    def test_skips_page_when_fetch_returns_none(self, mock_fetch, mock_delay):
-        mock_fetch.return_value = None
-        results = scrape_behance(keyword="test", pages=2)
-        assert results == []
-
-    @patch("scraper.behance_scraper.polite_delay")
-    @patch("scraper.behance_scraper.fetch_page")
-    def test_respects_max_images_limit(self, mock_fetch, mock_delay):
-        # Return same HTML repeatedly across pages
-        mock_fetch.return_value = MOCK_HTML_CARD_FALLBACK
-        with patch("scraper.behance_scraper.MAX_IMAGES_PER_KEYWORD", 1):
-            results = scrape_behance(keyword="dark", pages=5)
-        assert len(results) <= 1
-
-    @patch("scraper.behance_scraper.polite_delay")
-    @patch("scraper.behance_scraper.fetch_page")
-    def test_returns_list(self, mock_fetch, mock_delay):
-        mock_fetch.return_value = EMPTY_HTML
+    mock_extract.return_value = [
+        {"image_url": f"url{i}", "title": "T", "owner": "O", "source": "behance"}
+        for i in range(10)
+    ]
+    
+    with patch("scraper.behance_scraper.MAX_IMAGES_PER_KEYWORD", 5):
         results = scrape_behance(keyword="test", pages=1)
-        assert isinstance(results, list)
-
-    @patch("scraper.behance_scraper.polite_delay")
-    @patch("scraper.behance_scraper.fetch_page")
-    def test_no_delay_called_on_single_page(self, mock_fetch, mock_delay):
-        mock_fetch.return_value = EMPTY_HTML
-        scrape_behance(keyword="test", pages=1)
-        mock_delay.assert_not_called()
-
-    @patch("scraper.behance_scraper.polite_delay")
-    @patch("scraper.behance_scraper.fetch_page")
-    def test_delay_called_between_pages(self, mock_fetch, mock_delay):
-        mock_fetch.return_value = EMPTY_HTML
-        scrape_behance(keyword="test", pages=3)
-        # delay should be called between pages, not after the last one
-        assert mock_delay.call_count == 2
+        
+    assert len(results) == 5
