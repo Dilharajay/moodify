@@ -1,101 +1,97 @@
 """
 Phase 2 — Pinterest Dynamic Scraper
-Uses Playwright to scrape Pinterest search results.
-Pinterest is heavily JavaScript rendered and requires
-browser automation for any meaningful data extraction.
+Uses Playwright to launch a real Chromium browser, intercepting API calls to find pin data.
 """
 
 import json
-import re
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 from config import MAX_IMAGES_PER_KEYWORD, REQUEST_DELAY
 from utils.helpers import polite_delay, logger
 
-PINTEREST_SEARCH_URL = "https://www.pinterest.com/search/pins"
+PINTEREST_BASE_URL = "https://www.pinterest.com"
 
-
-def extract_pins_from_page(page) -> list[dict]:
+def extract_from_page(page, captured_responses: list) -> list[dict]:
     """
-    Extract pin image records from a rendered Pinterest page.
-    Pinterest injects pin data into <script> tags as JSON.
-    Falls back to scraping rendered pin grid if JSON unavailable.
+    Extract pin records from captured API responses.
+    Falls back to scraping rendered img tags if API responses are unavailable.
     """
-    pins = []
-
-    # Strategy 1 — look for embedded JSON in script tags
+    projects = []
+    
+    # Strategy 1 — Parse captured API responses
     try:
-        scripts = page.eval_on_selector_all(
-            "script[type='application/json'], script[id*='initial']",
-            "els => els.map(el => el.textContent)"
-        )
-        for script_text in scripts:
-            if not script_text or "images" not in script_text:
-                continue
-            try:
-                data = json.loads(script_text)
-                # Pinterest structures vary — walk the tree looking for pin objects
-                raw = json.dumps(data)
-                # Match 736x image URLs (Pinterest's standard display size)
-                image_urls = re.findall(
-                    r'"url"\s*:\s*"(https://i\.pinimg\.com/[^"]*736x[^"]*\.(?:jpg|jpeg|png|webp))"',
-                    raw
-                )
-                titles = re.findall(r'"description"\s*:\s*"([^"]{5,200})"', raw)
-                owners = re.findall(r'"full_name"\s*:\s*"([^"]+)"', raw)
-
-                for i, url in enumerate(image_urls[:MAX_IMAGES_PER_KEYWORD]):
-                    pins.append({
-                        "image_url": url,
-                        "title": titles[i].strip() if i < len(titles) else "Untitled",
-                        "owner": owners[i].strip() if i < len(owners) else "Unknown",
-                        "source": "pinterest",
-                        "keyword": None
-                    })
-
-                if pins:
-                    logger.info(f"Extracted {len(pins)} pins from embedded JSON")
-                    return pins
-
-            except json.JSONDecodeError:
-                continue
-
+        for response_body in captured_responses:
+            results = response_body.get("resource_response", {}).get("data", {}).get("results", [])
+            for item in results:
+                images = item.get("images", {})
+                
+                # Get the largest available image
+                image_info = images.get("orig") or images.get("736x") or images.get("474x")
+                if not image_info:
+                    continue
+                    
+                image_url = image_info.get("url")
+                if not image_url:
+                    continue
+                    
+                title = item.get("title") or item.get("grid_title") or item.get("description") or "Untitled"
+                pinner = item.get("pinner", {})
+                owner = pinner.get("full_name") or pinner.get("username") or "Unknown"
+                
+                projects.append({
+                    "image_url": image_url,
+                    "title": title.strip() if title.strip() else "Untitled",
+                    "owner": owner.strip() if owner.strip() else "Unknown",
+                    "source": "pinterest",
+                    "keyword": None
+                })
+        
+        if projects:
+            # Deduplicate by image_url
+            unique_projects = {p["image_url"]: p for p in projects}.values()
+            logger.info(f"Extracted {len(unique_projects)} projects from API responses")
+            return list(unique_projects)
+            
     except Exception as e:
-        logger.warning(f"JSON extraction failed: {e}")
+        logger.warning(f"API response parse failed: {e}")
 
-    # Strategy 2 — fallback to rendered pin grid img tags
+    # Strategy 2 — fallback to rendered img tags
     logger.info("Falling back to rendered img tag extraction...")
-    pin_imgs = page.query_selector_all("div[data-test-id='pin'] img, img[src*='pinimg.com']")
-    for img in pin_imgs:
-        src = img.get_attribute("src") or img.get_attribute("data-src") or ""
-        alt = img.get_attribute("alt") or "Untitled"
-        # Upgrade to 736x resolution if smaller size was returned
-        src = re.sub(r'/\d+x/', '/736x/', src)
-        if src and "pinimg.com" in src:
-            pins.append({
-                "image_url": src,
-                "title": alt.strip(),
-                "owner": "Unknown",
-                "source": "pinterest",
-                "keyword": None
-            })
+    cards = page.query_selector_all("div[data-test-id='pin']")
+    for card in cards:
+        img = card.query_selector("img")
+        title_el = card.query_selector("div[title]")
 
-    logger.info(f"Fallback extracted {len(pins)} pins")
-    return pins
+        if img:
+            src = img.get_attribute("src")
+            if src:
+                # Replace smaller resolution with 736x if possible
+                if "236x" in src:
+                    src = src.replace("236x", "736x")
+                    
+                projects.append({
+                    "image_url": src,
+                    "title": title_el.get_attribute("title") if title_el else img.get_attribute("alt") or "Untitled",
+                    "owner": "Unknown",
+                    "source": "pinterest",
+                    "keyword": None
+                })
+
+    # Deduplicate
+    unique_projects = {p["image_url"]: p for p in projects}.values()
+    logger.info(f"Fallback extracted {len(unique_projects)} projects")
+    return list(unique_projects)
 
 
 def scroll_to_load(page, target: int = 50):
     """
-    Scroll down to trigger Pinterest's infinite feed until
-    we reach the target count or stop finding new pins.
+    Scroll down repeatedly to trigger lazy loading.
     """
     previous_count = 0
     stall_count = 0
 
     while True:
-        current_pins = page.query_selector_all(
-            "div[data-test-id='pin'], img[src*='pinimg.com']"
-        )
-        current_count = len(current_pins)
+        current_cards = page.query_selector_all("div[data-test-id='pin']")
+        current_count = len(current_cards)
         logger.info(f"Pins visible: {current_count}")
 
         if current_count >= target:
@@ -103,7 +99,7 @@ def scroll_to_load(page, target: int = 50):
 
         if current_count == previous_count:
             stall_count += 1
-            if stall_count >= 3:
+            if stall_count >= 5:
                 logger.info("No new pins loading, stopping scroll.")
                 break
         else:
@@ -111,25 +107,14 @@ def scroll_to_load(page, target: int = 50):
 
         previous_count = current_count
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(2000)
 
 
-def scrape_pinterest(keyword: str, pages: int = 3) -> list[dict]:
+def scrape_pinterest(keyword: str, pages: int = 1) -> list[dict]:
     """
-    Main Pinterest scraper using Playwright.
-
-    Pinterest does not use traditional pagination — it uses an
-    infinite scroll feed. The `pages` argument controls how many
-    scroll cycles are attempted rather than literal page numbers.
-
-    Args:
-        keyword: Search term (e.g. "dark minimalism")
-        pages:   Number of scroll cycles (each loads ~20 new pins)
-
-    Returns:
-        List of pin dicts with image_url, title, owner, source, keyword
+    Main Pinterest scraper using Playwright API interception.
     """
-    all_pins = []
+    all_projects = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -143,42 +128,41 @@ def scrape_pinterest(keyword: str, pages: int = 3) -> list[dict]:
             locale="en-US",
         )
         page = context.new_page()
+        
+        captured_responses = []
 
-        # Block heavy assets to speed up loading
-        page.route("**/*.{woff,woff2,ttf}", lambda route: route.abort())
-
-        logger.info(f"Scraping Pinterest | Keyword: '{keyword}'")
+        def handle_response(response):
+            url = response.url
+            if "pinterest.com" in url and any(x in url for x in ["BaseSearch", "search/pins", "resource/Search", "search?", "api/v3"]):
+                try:
+                    body = response.json()
+                    captured_responses.append(body)
+                except Exception:
+                    pass
+        
+        page.on("response", handle_response)
 
         encoded_keyword = keyword.strip().replace(" ", "%20")
-        url = f"{PINTEREST_SEARCH_URL}/?q={encoded_keyword}&rs=typed"
+        url = f"{PINTEREST_BASE_URL}/search/pins/?q={encoded_keyword}&rs=typed"
 
         try:
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(3000)
 
-            # Dismiss login popup if it appears
-            try:
-                close_btn = page.query_selector("[data-test-id='closeup-close-button'], button[aria-label='Close']")
-                if close_btn:
-                    close_btn.click()
-                    page.wait_for_timeout(1000)
-                    logger.info("Dismissed login popup")
-            except Exception:
-                pass
-
-            # Scroll to load pins up to our target
+            # Scroll to load more cards
             scroll_to_load(page, target=MAX_IMAGES_PER_KEYWORD)
 
-            pins = extract_pins_from_page(page)
-            for pin in pins:
-                pin["keyword"] = keyword
+            projects = extract_from_page(page, captured_responses)
 
-            all_pins.extend(pins)
-            logger.info(f"Total pins collected: {len(all_pins)}")
+            for p_item in projects:
+                p_item["keyword"] = keyword
+
+            all_projects.extend(projects)
+            logger.info(f"Running total: {len(all_projects)} projects")
 
         except PlaywrightTimeout:
-            logger.warning("Timeout loading Pinterest page.")
+            logger.warning(f"Timeout on Pinterest scraping, skipping.")
 
         browser.close()
 
-    return all_pins[:MAX_IMAGES_PER_KEYWORD]
+    return all_projects[:MAX_IMAGES_PER_KEYWORD]
