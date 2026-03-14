@@ -233,6 +233,62 @@ def action_pipeline_phase5(conn, args):
 
 ACTION_MAP["pipeline"] = action_pipeline_phase5
 
+# ─── Phase 6 additions ────────────────────────────────────────────────────────
+
+from utils.board_maker import generate_all_boards
+
+
+def action_boards(conn, args):
+    """
+    Generate mood board PNG and PDF exports for all clusters of a keyword.
+    Requires Phase 4 (feature matrix) and Phase 5 (clustering) to have run first.
+    """
+    if not args.keyword:
+        print("[Error] --keyword is required for the boards action.")
+        return
+
+    print(f"\n{'=' * 55}")
+    print(f"  AestheteAI — Phase 6 | Generate Mood Boards")
+    print(f"  Keyword : {args.keyword}")
+    print(f"{'=' * 55}\n")
+
+    # Load the feature matrix and image ID list built in Phase 4
+    import numpy as np, os
+    safe_kw = args.keyword.strip().lower().replace(" ", "_")
+    feature_path = os.path.join("data", "embeddings", f"features_{safe_kw}.npy")
+
+    if not os.path.exists(feature_path):
+        print(f"[Error] Feature matrix not found: {feature_path}")
+        print(f"        Run: python main.py --action build_features --keyword \"{args.keyword}\"")
+        return
+
+    feature_matrix = np.load(feature_path)
+
+    # Reconstruct the image ID list in the same row order as the matrix.
+    # get_embedded() returns rows in insertion order, which matches how
+    # build_feature_matrix() built the matrix.
+    from utils.database import get_embedded
+    rows = get_embedded(conn, keyword=args.keyword)
+    image_ids = [r["id"] for r in rows
+                 if r["image_embedding_path"] and r["color_histogram"]]
+
+    generate_all_boards(conn, args.keyword, feature_matrix, image_ids)
+
+
+ACTION_MAP["boards"] = action_boards
+
+# Extend the pipeline to include Phase 6
+_pipeline_phase5 = ACTION_MAP["pipeline"]
+
+
+def action_pipeline_phase6(conn, args):
+    """Full pipeline through Phase 6."""
+    _pipeline_phase5(conn, args)
+    action_boards(conn, args)
+
+
+ACTION_MAP["pipeline"] = action_pipeline_phase6
+
 def main():
     parser = argparse.ArgumentParser(
         description="AestheteAI — Keyword-driven mood board pipeline",

@@ -383,3 +383,140 @@ def compose_board(conn,
               font=footer_font, fill=TEXT_SECONDARY, anchor="mm")
 
     return canvas
+
+
+# ─── Export ───────────────────────────────────────────────────────────────────
+
+def export_board(board: Image.Image,
+                 keyword: str,
+                 cluster_id: int,
+                 cluster_label: str) -> tuple:
+    """
+    Save a composed mood board as both PNG and PDF.
+
+    Both files are saved to output/boards/{safe_keyword}/ with a filename
+    that includes the cluster ID and a slug of the cluster label.
+
+    Parameters
+    ----------
+    board         : composed PIL Image from compose_board()
+    keyword       : search keyword (used in directory name)
+    cluster_id    : integer cluster ID (used in filename)
+    cluster_label : human-readable label (slugified for filename)
+
+    Returns
+    -------
+    (png_path, pdf_path) — paths to the saved files
+    """
+    safe_keyword = keyword.strip().lower().replace(" ", "_")
+    label_slug = cluster_label.lower().replace(" ", "_")
+    board_dir = os.path.join(OUTPUT_DIR, safe_keyword)
+    os.makedirs(board_dir, exist_ok=True)
+
+    base_name = f"board_c{cluster_id}_{label_slug}"
+
+    # ── PNG export ──
+    png_path = os.path.join(board_dir, f"{base_name}.png")
+    board.save(png_path, format="PNG", optimize=True)
+    print(f"[BoardMaker] PNG saved → {png_path}")
+
+    # ── PDF export ──
+    # reportlab works in points (1 point = 1/72 inch).
+    # Our canvas is 2400 × 1600 px. At 200 dpi:
+    #   width  = 2400/200 inches = 12 inches = 864 points
+    #   height = 1600/200 inches =  8 inches = 576 points
+    pdf_path = os.path.join(board_dir, f"{base_name}.pdf")
+    pdf_w_pt = (CANVAS_W / 200) * 72  # 864 pt
+    pdf_h_pt = (CANVAS_H / 200) * 72  # 576 pt
+
+    # Convert PIL image to a BytesIO buffer that reportlab can read
+    img_buffer = BytesIO()
+    board.save(img_buffer, format="PNG")
+    img_buffer.seek(0)
+
+    pdf = rl_canvas.Canvas(pdf_path, pagesize=(pdf_w_pt, pdf_h_pt))
+    pdf.drawImage(
+        ImageReader(img_buffer),
+        x=0, y=0,
+        width=pdf_w_pt, height=pdf_h_pt,
+        preserveAspectRatio=True
+    )
+    pdf.save()
+    print(f"[BoardMaker] PDF saved → {pdf_path}")
+
+    return png_path, pdf_path
+
+
+# ─── Batch Generation ────────────────────────────────────────────────────────
+
+def generate_all_boards(conn,
+                        keyword: str,
+                        feature_matrix: np.ndarray,
+                        image_ids_full: list) -> list:
+    """
+    Generate and export mood boards for all clusters of a keyword.
+
+    Iterates over every unique cluster_id in the DB for this keyword
+    (excluding noise, cluster_id = -1), composes a board for each,
+    and exports both PNG and PDF.
+
+    Parameters
+    ----------
+    conn            : open SQLite connection
+    keyword         : the search keyword
+    feature_matrix  : the (N, 560) feature matrix from Phase 4
+    image_ids_full  : DB row IDs corresponding to feature matrix rows
+
+    Returns
+    -------
+    list of dicts: [{"cluster_id": ..., "label": ..., "png": ..., "pdf": ...}, ...]
+    """
+    # Fetch all distinct clusters for this keyword, excluding noise
+    cluster_rows = conn.execute(
+        """
+        SELECT DISTINCT cluster_id, cluster_label
+        FROM images
+        WHERE keyword = ?
+          AND cluster_id IS NOT NULL
+          AND cluster_id != -1
+        ORDER BY cluster_id
+        """,
+        (keyword,)
+    ).fetchall()
+
+    if not cluster_rows:
+        print(f"[BoardMaker] No clusters found for keyword '{keyword}'.")
+        print(f"             Run clustering first: python main.py --action cluster --keyword \"{keyword}\"")
+        return []
+
+    print(f"\n[BoardMaker] Generating boards for {len(cluster_rows)} cluster(s)...\n")
+    results = []
+
+    for row in cluster_rows:
+        cid = row["cluster_id"]
+        label = row["cluster_label"] or f"cluster {cid}"
+
+        board = compose_board(
+            conn=conn,
+            cluster_id=cid,
+            cluster_label=label,
+            keyword=keyword,
+            feature_matrix=feature_matrix,
+            image_ids_full=image_ids_full,
+        )
+
+        if board is None:
+            continue
+
+        png_path, pdf_path = export_board(board, keyword, cid, label)
+
+        results.append({
+            "cluster_id": cid,
+            "label": label,
+            "png": png_path,
+            "pdf": pdf_path,
+        })
+        print()  # blank line between clusters for readability
+
+    print(f"[BoardMaker] Done. {len(results)} board(s) saved to output/boards/{keyword.replace(' ', '_')}/")
+    return results
