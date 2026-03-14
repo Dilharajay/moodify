@@ -4,5 +4,6 @@
 /__pycache__/
 /scraper/__pycache__/
 /utils/__pycache__/
+tests/__pycache__/
 
-commits.md
+/data
