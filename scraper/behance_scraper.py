@@ -12,39 +12,55 @@ from utils.helpers import polite_delay, logger
 
 BEHANCE_BASE_URL = "https://www.behance.net/search/projects"
 
+def find_projects_recursive(data):
+    """Recursively search for the list of projects inside the Behance JSON blob."""
+    if isinstance(data, dict):
+        # Standard signature of a Behance project item: has "covers", "name", "owners"
+        if "projects" in data and isinstance(data["projects"], list) and data["projects"] and isinstance(data["projects"][0], dict) and "covers" in data["projects"][0]:
+            return data["projects"]
+        if "items" in data and isinstance(data["items"], list) and data["items"] and isinstance(data["items"][0], dict) and "covers" in data["items"][0]:
+            return data["items"]
+        for k, v in data.items():
+            result = find_projects_recursive(v)
+            if result:
+                return result
+    elif isinstance(data, list):
+        if data and isinstance(data[0], dict) and "covers" in data[0] and "name" in data[0]:
+            return data
+        for item in data:
+            result = find_projects_recursive(item)
+            if result:
+                return result
+    return None
 
 def extract_from_page(page) -> list[dict]:
     """
     Extract image records from a fully rendered Behance page.
-    Targets the __NEXT_DATA__ JSON blob injected by Behance.
+    Targets the large inline JSON blob injected by Behance.
     Falls back to scraping rendered img tags if JSON is unavailable.
     """
     projects = []
 
-    # Strategy 1 — parse __NEXT_DATA__ JSON blob
+    # Strategy 1 — parse inline JSON blob
     try:
-        next_data_raw = page.eval_on_selector(
-            "script#__NEXT_DATA__",
-            "el => el.textContent"
-        )
-        if next_data_raw:
-            data = json.loads(next_data_raw)
-            results = (
-                data.get("props", {})
-                    .get("pageProps", {})
-                    .get("dehydratedState", {})
-                    .get("queries", [{}])[0]
-                    .get("state", {})
-                    .get("data", {})
-                    .get("search", {})
-                    .get("content", {})
-                    .get("projects", {})
-                    .get("items", [])
-            )
+        scripts = page.eval_on_selector_all("script", "els => els.map(e => e.textContent)")
+        blob = None
+        for s in scripts:
+            if s and "mir-s3" in s and len(s) > 10000:
+                blob = s
+                break
+                
+        if blob:
+            data = json.loads(blob)
+            results = find_projects_recursive(data) or []
+            
             for item in results:
                 covers = item.get("covers", {})
+                # Prefer highest resolution available
                 image_url = (
                     covers.get("original") or
+                    covers.get("max_1400") or 
+                    covers.get("115") or
                     covers.get("max_808") or
                     covers.get("404") or
                     covers.get("202")
@@ -60,11 +76,13 @@ def extract_from_page(page) -> list[dict]:
                 })
 
             if projects:
-                logger.info(f"Extracted {len(projects)} projects from __NEXT_DATA__")
-                return projects
+                # Deduplicate by image_url
+                unique_projects = {p["image_url"]: p for p in projects}.values()
+                logger.info(f"Extracted {len(unique_projects)} projects from inline JSON blob")
+                return list(unique_projects)
 
     except Exception as e:
-        logger.warning(f"__NEXT_DATA__ parse failed: {e}")
+        logger.warning(f"Inline JSON blob parse failed: {e}")
 
     # Strategy 2 — fallback to rendered img tags
     logger.info("Falling back to rendered img tag extraction...")
@@ -85,8 +103,10 @@ def extract_from_page(page) -> list[dict]:
                     "keyword": None
                 })
 
-    logger.info(f"Fallback extracted {len(projects)} projects")
-    return projects
+    # Deduplicate
+    unique_projects = {p["image_url"]: p for p in projects}.values()
+    logger.info(f"Fallback extracted {len(unique_projects)} projects")
+    return list(unique_projects)
 
 
 def scroll_to_load(page, target: int = 50):
@@ -151,7 +171,7 @@ def scrape_behance(keyword: str, pages: int = 3) -> list[dict]:
             logger.info(f"Scraping Behance | Keyword: '{keyword}' | Page: {page_num}")
 
             encoded_keyword = keyword.strip().replace(" ", "%20")
-            url = f"{BEHANCE_BASE_URL}/{encoded_keyword}?sort=recommended&page={page_num}"
+            url = f"{BEHANCE_BASE_URL}/{encoded_keyword}?sort=recommended&tracking_source=typeahead_search_direct"
 
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=30000)
