@@ -20,7 +20,13 @@ def extract_from_page(page, captured_responses: list) -> list[dict]:
     # Strategy 1 — Parse captured API responses
     try:
         for response_body in captured_responses:
-            results = response_body.get("resource_response", {}).get("data", {}).get("results", [])
+            data_node = response_body.get("resource_response", {}).get("data")
+            results = []
+            if isinstance(data_node, dict):
+                results = data_node.get("results", [])
+            elif isinstance(data_node, list):
+                results = data_node
+                
             for item in results:
                 images = item.get("images", {})
                 

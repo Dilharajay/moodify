@@ -15,22 +15,37 @@ BEHANCE_BASE_URL = "https://www.behance.net/search/projects"
 def find_projects_recursive(data):
     """Recursively search for the list of projects inside the Behance JSON blob."""
     if isinstance(data, dict):
+        # Look for "nodes" if we are inside a search or projects dict
+        if "nodes" in data and isinstance(data["nodes"], list) and data["nodes"]:
+            first = data["nodes"][0]
+            if isinstance(first, dict) and "covers" in first and "name" in first and "owners" in first:
+                return data["nodes"]
+        
         # Standard signature of a Behance project item: has "covers", "name", "owners"
-        if "projects" in data and isinstance(data["projects"], list) and data["projects"] and isinstance(data["projects"][0], dict) and "covers" in data["projects"][0]:
-            return data["projects"]
-        if "items" in data and isinstance(data["items"], list) and data["items"] and isinstance(data["items"][0], dict) and "covers" in data["items"][0]:
-            return data["items"]
+        if "projects" in data and isinstance(data["projects"], list) and data["projects"]:
+            first = data["projects"][0]
+            if isinstance(first, dict) and "covers" in first and "name" in first and "owners" in first:
+                return data["projects"]
+                
+        if "items" in data and isinstance(data["items"], list) and data["items"]:
+            first = data["items"][0]
+            if isinstance(first, dict) and "covers" in first and "name" in first and "owners" in first:
+                return data["items"]
+
         for k, v in data.items():
-            result = find_projects_recursive(v)
-            if result:
-                return result
+            # Skip very small values to save recursion depth
+            if isinstance(v, (dict, list)):
+                result = find_projects_recursive(v)
+                if result:
+                    return result
     elif isinstance(data, list):
-        if data and isinstance(data[0], dict) and "covers" in data[0] and "name" in data[0]:
+        if data and isinstance(data[0], dict) and "covers" in data[0] and "name" in data[0] and "owners" in data[0]:
             return data
         for item in data:
-            result = find_projects_recursive(item)
-            if result:
-                return result
+            if isinstance(item, (dict, list)):
+                result = find_projects_recursive(item)
+                if result:
+                    return result
     return None
 
 def extract_from_page(page) -> list[dict]:
@@ -55,22 +70,57 @@ def extract_from_page(page) -> list[dict]:
             results = find_projects_recursive(data) or []
             
             for item in results:
+                # Extract Title
+                title = item.get("name") or item.get("title") or "Untitled"
+                
+                # Extract Owner
+                owners = item.get("owners", [])
+                owner = "Unknown"
+                if owners and isinstance(owners, list):
+                    owner = owners[0].get("displayName") or owners[0].get("display_name") or "Unknown"
+                
+                # Extract Image URL
+                image_url = None
                 covers = item.get("covers", {})
-                # Prefer highest resolution available
-                image_url = (
-                    covers.get("original") or
-                    covers.get("max_1400") or 
-                    covers.get("115") or
-                    covers.get("max_808") or
-                    covers.get("404") or
-                    covers.get("202")
-                )
+                
+                # Option A: Look in allAvailable list (best for modern Behance)
+                all_available = covers.get("allAvailable", [])
+                if all_available and isinstance(all_available, list):
+                    # Prefer original_webp or largest width
+                    original_webp = next((c for c in all_available if "original_webp" in c.get("url", "")), None)
+                    if original_webp:
+                        image_url = original_webp.get("url")
+                    else:
+                        # Fallback to the one with largest width or just the first one
+                        sorted_covers = sorted(
+                            [c for c in all_available if c.get("width")],
+                            key=lambda x: x["width"], reverse=True
+                        )
+                        if sorted_covers:
+                            image_url = sorted_covers[0].get("url")
+                        elif all_available:
+                            image_url = all_available[0].get("url")
+                
+                # Option B: Fallback to direct keys (old Behance style)
+                if not image_url:
+                    image_url = (
+                        covers.get("original") or
+                        covers.get("max_1400") or 
+                        covers.get("size_1400", {}).get("url") or
+                        covers.get("size_808", {}).get("url") or
+                        covers.get("808")
+                    )
+                    # If it's a dict, get the url key
+                    if isinstance(image_url, dict):
+                        image_url = image_url.get("url")
+
                 if not image_url:
                     continue
+
                 projects.append({
                     "image_url": image_url,
-                    "title": item.get("name", "Untitled"),
-                    "owner": item.get("owners", [{}])[0].get("display_name", "Unknown"),
+                    "title": str(title).strip(),
+                    "owner": str(owner).strip(),
                     "source": "behance",
                     "keyword": None
                 })
@@ -86,18 +136,35 @@ def extract_from_page(page) -> list[dict]:
 
     # Strategy 2 — fallback to rendered img tags
     logger.info("Falling back to rendered img tag extraction...")
-    cards = page.query_selector_all("div[class*='ProjectCoverNeue']")
+    cards = page.query_selector_all("div[class*='ProjectCoverNeue'], div[class*='Grid-item']")
     for card in cards:
         img = card.query_selector("img")
-        title_el = card.query_selector("p[class*='title'], span[class*='title']")
-        owner_el = card.query_selector("a[class*='owner'], span[class*='owner']")
+        # Try multiple selectors for title and owner
+        title_el = (
+            card.query_selector("p[class*='title']") or 
+            card.query_selector("span[class*='title']") or
+            card.query_selector("a[class*='title']") or
+            card.query_selector(".Title-line")
+        )
+        owner_el = (
+            card.query_selector("a[class*='owner']") or 
+            card.query_selector("span[class*='owner']") or
+            card.query_selector(".Owner-name")
+        )
 
         if img:
             src = img.get_attribute("src") or img.get_attribute("data-src") or ""
             if src:
+                # If we have a source but no title, try getting it from alt
+                title = "Untitled"
+                if title_el:
+                    title = title_el.inner_text().strip()
+                elif img.get_attribute("alt"):
+                    title = img.get_attribute("alt").strip()
+
                 projects.append({
                     "image_url": src,
-                    "title": title_el.inner_text().strip() if title_el else "Untitled",
+                    "title": title,
                     "owner": owner_el.inner_text().strip() if owner_el else "Unknown",
                     "source": "behance",
                     "keyword": None
