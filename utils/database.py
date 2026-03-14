@@ -460,3 +460,26 @@ def update_embedding(conn: sqlite3.Connection,
         (image_embedding_path, image_id),
     )
     conn.commit()
+
+
+# ─── Phase 5: Schema Migration ────────────────────────────────────────────────
+
+def migrate_schema_phase5(conn: sqlite3.Connection) -> None:
+    """
+    Add Phase 5 clustering columns to the images table.
+
+    cluster_id    — integer cluster label from HDBSCAN (-1 = noise)
+    cluster_label — human-readable label e.g. "cinematic deep navy"
+
+    Same additive pattern as Phase 4: safe to call on any existing DB,
+    duplicate column errors are silently caught.
+    """
+    for column_def in [
+        "ALTER TABLE images ADD COLUMN cluster_id    INTEGER",
+        "ALTER TABLE images ADD COLUMN cluster_label TEXT",
+    ]:
+        try:
+            conn.execute(column_def)
+        except sqlite3.OperationalError:
+            pass
+    conn.commit()

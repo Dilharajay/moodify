@@ -193,6 +193,46 @@ def action_pipeline_phase4(conn, args):
 
 ACTION_MAP["pipeline"] = action_pipeline_phase4
 
+# ─── Phase 5 additions ────────────────────────────────────────────────────────
+
+from utils.database import migrate_schema_phase5
+from utils.clusterer import run_clustering_pipeline
+
+
+def action_cluster(conn, args):
+    """
+    Run the full Phase 5 clustering pipeline for a keyword:
+    UMAP reduction → HDBSCAN → auto-labelling → scatter plot → cluster previews.
+    """
+    if not args.keyword:
+        print("[Error] --keyword is required for the cluster action.")
+        return
+
+    migrate_schema_phase5(conn)
+
+    print(f"\n{'=' * 55}")
+    print(f"  AestheteAI — Phase 5 | Cluster")
+    print(f"  Keyword : {args.keyword}")
+    print(f"{'=' * 55}\n")
+
+    run_clustering_pipeline(conn, keyword=args.keyword)
+
+
+ACTION_MAP["cluster"] = action_cluster
+
+# Extend the pipeline to include Phase 5
+_pipeline_phase4 = ACTION_MAP["pipeline"]
+
+
+def action_pipeline_phase5(conn, args):
+    """Full pipeline through Phase 5: scrape → download → colors → embed → features → cluster."""
+    migrate_schema_phase5(conn)
+    _pipeline_phase4(conn, args)
+    action_cluster(conn, args)
+
+
+ACTION_MAP["pipeline"] = action_pipeline_phase5
+
 def main():
     parser = argparse.ArgumentParser(
         description="AestheteAI — Keyword-driven mood board pipeline",
