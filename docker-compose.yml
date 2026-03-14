@@ -1,0 +1,50 @@
+# docker-compose.yml — AestheteAI local development
+#
+# Usage:
+#   docker-compose up --build       # first run
+#   docker-compose up               # subsequent runs (uses cached image)
+#   docker-compose down             # stop and remove container
+#
+# Volume mounts:
+#   data/ and output/ are mounted from the host so that all pre-computed
+#   results (images, embeddings, mood boards) persist across container
+#   restarts. The container reads from and writes to the same directories
+#   as the local CLI pipeline.
+#
+# Port mapping:
+#   localhost:8501 → container:7860
+#   Browse to http://localhost:8501 after starting.
+
+version: "3.9"
+
+services:
+  aestheteai:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: aestheteai:latest
+    container_name: aestheteai_app
+
+    ports:
+      - "8501:7860"
+
+    volumes:
+      # Mount data and output directories so pre-computed results persist.
+      # These paths are relative to the docker-compose.yml location.
+      - ./data:/app/data
+      - ./output:/app/output
+
+    environment:
+      # Suppress HuggingFace Hub telemetry inside the container
+      - HF_HUB_DISABLE_TELEMETRY=1
+      # Suppress transformers progress bars (cleaner logs)
+      - TRANSFORMERS_VERBOSITY=error
+
+    restart: unless-stopped
+
+    # Resource limits — adjust based on your machine.
+    # The UI itself is lightweight; these are generous defaults.
+    deploy:
+      resources:
+        limits:
+          memory: 4G
