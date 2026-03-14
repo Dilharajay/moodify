@@ -356,3 +356,107 @@ def get_stats(conn: sqlite3.Connection) -> dict:
         "pending_colors": downloaded - colors_done,
         "by_source": by_source,
     }
+
+
+# ─── Phase 4: Schema Migration ────────────────────────────────────────────────
+
+def migrate_schema_phase4(conn: sqlite3.Connection) -> None:
+    """
+    Add Phase 4 embedding path columns to the images table.
+
+    Why ALTER TABLE instead of putting these in CREATE_IMAGES_TABLE?
+    Because existing databases (created in Phase 3) already have the images
+    table without these columns. ALTER TABLE ADD COLUMN is the safe, additive
+    way to extend an existing schema without losing any data.
+
+    This function is idempotent — calling it on a database that already has
+    these columns will silently do nothing (the try/except catches the
+    "duplicate column" error from SQLite).
+
+    Columns added:
+        image_embedding_path  — path to the .npy file for this image's CLIP embedding
+        text_embedding_path   — path to the .npy file for the keyword text embedding
+                                (same for all images sharing a keyword)
+    """
+    for column_def in [
+        "ALTER TABLE images ADD COLUMN image_embedding_path TEXT",
+        "ALTER TABLE images ADD COLUMN text_embedding_path  TEXT",
+    ]:
+        try:
+            conn.execute(column_def)
+        except sqlite3.OperationalError:
+            # Column already exists — safe to ignore
+            pass
+    conn.commit()
+
+
+# ─── Phase 4: Query helpers ───────────────────────────────────────────────────
+
+def get_unembedded(conn: sqlite3.Connection,
+                   keyword: str = None) -> list:
+    """
+    Return all images that have been downloaded but do not yet have a
+    CLIP image embedding (image_embedding_path is NULL).
+
+    These are the images the embedder needs to process next.
+    """
+    if keyword:
+        return conn.execute(
+            """
+            SELECT * FROM images
+            WHERE local_path IS NOT NULL
+              AND image_embedding_path IS NULL
+              AND keyword = ?
+            """,
+            (keyword,),
+        ).fetchall()
+    return conn.execute(
+        """
+        SELECT * FROM images
+        WHERE local_path IS NOT NULL
+          AND image_embedding_path IS NULL
+        """
+    ).fetchall()
+
+
+def get_embedded(conn: sqlite3.Connection,
+                 keyword: str = None) -> list:
+    """
+    Return all images that have a CLIP image embedding.
+    Used by build_feature_matrix() to load embeddings for clustering.
+    """
+    if keyword:
+        return conn.execute(
+            """
+            SELECT * FROM images
+            WHERE image_embedding_path IS NOT NULL
+              AND keyword = ?
+            """,
+            (keyword,),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM images WHERE image_embedding_path IS NOT NULL"
+    ).fetchall()
+
+
+def update_embedding(conn: sqlite3.Connection,
+                     image_id: int,
+                     image_embedding_path: str) -> None:
+    """
+    After saving a CLIP image embedding to disk, record its path in the DB.
+
+    Parameters
+    ----------
+    image_id             : the row's primary key
+    image_embedding_path : relative path to the .npy file,
+                           e.g. 'data/embeddings/images/abc123def456.npy'
+    """
+    conn.execute(
+        """
+        UPDATE images
+        SET image_embedding_path = ?
+        WHERE id = ?
+        """,
+        (image_embedding_path, image_id),
+    )
+    conn.commit()
