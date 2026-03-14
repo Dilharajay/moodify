@@ -130,6 +130,69 @@ ACTION_MAP = {
 }
 
 
+
+# ─── Phase 4 additions ────────────────────────────────────────────────────────
+# These are appended here and merged into ACTION_MAP at the bottom of the file.
+# In production, you would refactor the whole file rather than appending,
+# but for a learning project this keeps each phase's changes clearly visible.
+
+from utils.database import migrate_schema_phase4
+from utils.embedder import encode_images_batch, save_keyword_embedding, build_feature_matrix
+
+
+def action_embed(conn, args):
+    """
+    Encode all downloaded images using CLIP and save embeddings to disk.
+    Also encodes the keyword as a text embedding.
+    """
+    # Ensure Phase 4 columns exist (safe to call on any existing DB)
+    migrate_schema_phase4(conn)
+
+    print(f"\n{'='*55}")
+    print(f"  AestheteAI — Phase 4 | CLIP Image Embeddings")
+    print(f"{'='*55}\n")
+
+    keyword_filter = getattr(args, "keyword", None)
+    encode_images_batch(conn, keyword=keyword_filter)
+
+    # Also encode the keyword as a text embedding if one was provided
+    if keyword_filter:
+        print()
+        save_keyword_embedding(keyword_filter)
+
+
+def action_build_features(conn, args):
+    """
+    Build the unified feature matrix (CLIP + color histogram) for a keyword.
+    This is the input to Phase 5 clustering.
+    """
+    if not args.keyword:
+        print("[Error] --keyword is required for the build_features action.")
+        return
+
+    print(f"\n{'='*55}")
+    print(f"  AestheteAI — Phase 4 | Build Feature Matrix")
+    print(f"{'='*55}\n")
+
+    build_feature_matrix(conn, keyword=args.keyword)
+
+
+# Extend the action map with Phase 4 entries
+ACTION_MAP["embed"]          = action_embed
+ACTION_MAP["build_features"] = action_build_features
+
+# Update pipeline to include Phase 4 steps
+_original_pipeline = ACTION_MAP["pipeline"]
+
+def action_pipeline_phase4(conn, args):
+    """Full pipeline: scrape → download → colors → embed → build_features."""
+    migrate_schema_phase4(conn)
+    _original_pipeline(conn, args)
+    action_embed(conn, args)
+    action_build_features(conn, args)
+
+ACTION_MAP["pipeline"] = action_pipeline_phase4
+
 def main():
     parser = argparse.ArgumentParser(
         description="AestheteAI — Keyword-driven mood board pipeline",
