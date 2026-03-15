@@ -1,5 +1,5 @@
 ---
-title: AestheteAI
+title:Moodify
 emoji: 🎨
 colorFrom: indigo
 colorTo: pink
@@ -18,7 +18,7 @@ pinned: false
 
 <div align="center">
 
-# 🎨 AestheteAI
+# Moodify
 
 ### Keyword-Driven Mood Board Generation via Multi-Source Visual Scraping and Semantic Image Clustering
 
@@ -28,8 +28,6 @@ pinned: false
 [![Docker](https://img.shields.io/badge/Deploy-Docker-blue?style=flat-square&logo=docker)](https://docker.com)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
-*University Academic Project — Department of Data Science, Sabaragamuwa University of Sri Lanka*
-
 [Overview](#overview) · [Demo](#demo) · [How It Works](#how-it-works) · [Getting Started](#getting-started) · [Usage](#usage) · [Project Structure](#project-structure) · [Documentation](#documentation)
 
 </div>
@@ -38,7 +36,7 @@ pinned: false
 
 ## Overview
 
-AestheteAI takes a search keyword and automatically generates aesthetic mood boards by scraping visual content from Behance and Pinterest, clustering images by visual and semantic similarity, and composing them into designed, exportable boards.
+moodify takes a search keyword and automatically generates aesthetic mood boards by scraping visual content from Behance and Pinterest, clustering images by visual and semantic similarity, and composing them into designed, exportable boards.
 
 The system combines web scraping, computer vision, and unsupervised machine learning into a single end-to-end pipeline. Given a keyword like `"dark minimalism"`, it produces clusters labelled `"cinematic deep navy"` or `"stark geometric"` — each one a distinct aesthetic identity found in the data.
 
@@ -240,7 +238,7 @@ aesthete-ai/
 ├── tests/                    Full pytest test suite (7 test files)
 │
 ├── data/
-│   ├── aestheteai.db         SQLite database
+│   ├── Moodify.db         SQLite database
 │   ├── raw/                  Phase 2 JSON scraper output
 │   ├── images/               Downloaded image files
 │   ├── embeddings/           CLIP .npy files + feature matrices
@@ -342,12 +340,8 @@ This project was developed as a university assignment for the Department of Data
 
 ## Author
 
-**Jay (D.W.D.P Jayawardhana)**
+**DilharaJay**
 Data Science Undergraduate, Sabaragamuwa University of Sri Lanka
 GitHub: [@DilharaJay](https://github.com/DilharaJay)
 
 ---
-
-<div align="center">
-<sub>Built with 🎨 and a lot of dark minimalism</sub>
-</div>
